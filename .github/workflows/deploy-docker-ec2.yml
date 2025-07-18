@@ -1,0 +1,179 @@
+name: Deploy Moodle Docker to EC2
+
+on:
+  push:
+    branches:
+    #   - main
+      - staging*
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: moodle
+  ECS_CLUSTER: moodle-cluster
+  ECS_SERVICE: moodle-service
+  ECS_TASK_DEFINITION: moodle-task
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build Docker image
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          
+          # Push to ECR
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          
+      - name: Deploy to EC2 with Docker Compose
+        run: |
+          # Create deployment script
+          cat > deploy-docker.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          
+          echo "Starting Docker deployment..."
+          
+          # Pull latest images
+          docker-compose pull
+          
+          # Stop existing containers
+          docker-compose down
+          
+          # Remove old images to save space
+          docker image prune -f
+          
+          # Start new containers
+          docker-compose up -d
+          
+          # Wait for services to be healthy
+          echo "Waiting for services to be ready..."
+          sleep 30
+          
+          # Check if Moodle is responding
+          if curl -f http://localhost:8080/ > /dev/null 2>&1; then
+            echo "✅ Moodle is running successfully!"
+          else
+            echo "❌ Moodle is not responding"
+            exit 1
+          fi
+          
+          echo "Deployment completed successfully!"
+          EOF
+          
+          chmod +x deploy-docker.sh
+          
+      - name: Copy files to EC2
+        run: |
+          # Copy Docker Compose file and deployment script
+          scp -o StrictHostKeyChecking=no -i ${{ secrets.EC2_SSH_KEY }} \
+            docker-compose.yml \
+            deploy-docker.sh \
+            ubuntu@${{ secrets.EC2_HOST }}:/home/ubuntu/moodle/
+            
+      - name: Execute deployment on EC2
+        run: |
+          # Execute deployment script on EC2
+          ssh -o StrictHostKeyChecking=no -i ${{ secrets.EC2_SSH_KEY }} \
+            ubuntu@${{ secrets.EC2_HOST }} \
+            'cd /home/ubuntu/moodle && ./deploy-docker.sh'
+            
+      - name: Health check
+        run: |
+          # Wait for deployment to complete
+          sleep 60
+          
+          # Perform health check
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.EC2_HOST }}:8080)
+          
+          if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "302" ]; then
+            echo "✅ Health check passed! HTTP Status: $HTTP_STATUS"
+          else
+            echo "❌ Health check failed! HTTP Status: $HTTP_STATUS"
+            exit 1
+          fi
+          
+      - name: Cleanup
+        if: always()
+        run: |
+          # Clean up temporary files on EC2
+          ssh -o StrictHostKeyChecking=no -i ${{ secrets.EC2_SSH_KEY }} \
+            ubuntu@${{ secrets.EC2_HOST }} \
+            'rm -f /home/ubuntu/moodle/deploy-docker.sh'
+            
+      - name: Notify deployment status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "🚀 Docker deployment to ${{ github.event.inputs.environment || 'staging' }} completed successfully!"
+            echo "Image: ${{ steps.build-image.outputs.image }}"
+          else
+            echo "❌ Docker deployment to ${{ github.event.inputs.environment || 'staging' }} failed!"
+          fi
+
+  # Alternative: Deploy using ECS (uncomment if using ECS instead of Docker Compose)
+  # deploy-ecs:
+  #   needs: build-and-deploy
+  #   runs-on: ubuntu-latest
+  #   
+  #   steps:
+  #     - name: Configure AWS credentials
+  #       uses: aws-actions/configure-aws-credentials@v4
+  #       with:
+  #         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #         aws-region: ${{ env.AWS_REGION }}
+  #         
+  #     - name: Download task definition
+  #       run: |
+  #         aws ecs describe-task-definition --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+  #         --query taskDefinition > task-definition.json
+  #         
+  #     - name: Fill in the new image ID in the Amazon ECS task definition
+  #       id: task-def
+  #       uses: aws-actions/amazon-ecs-render-task-definition@v2
+  #       with:
+  #         task-definition: task-definition.json
+  #         container-name: moodle
+  #         image: ${{ steps.build-image.outputs.image }}
+  #         
+  #     - name: Deploy Amazon ECS task definition
+  #       uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+  #       with:
+  #         task-definition: ${{ steps.task-def.outputs.task-definition }}
+  #         service: ${{ env.ECS_SERVICE }}
+  #         cluster: ${{ env.ECS_CLUSTER }}
+  #         wait-for-service-stability: true 

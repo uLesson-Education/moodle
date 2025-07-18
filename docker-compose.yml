@@ -1,0 +1,133 @@
+version: '3.8'
+
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: moodle-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-moodle}
+      MYSQL_USER: ${MYSQL_USER:-moodle}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-moodle}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d
+    networks:
+      - moodle-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: moodle-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - moodle-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 3s
+      retries: 5
+
+  # Moodle Application
+  moodle:
+    build: .
+    container_name: moodle-app
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Database configuration
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${MYSQL_DATABASE:-moodle}
+      DB_USER: ${MYSQL_USER:-moodle}
+      DB_PASS: ${MYSQL_PASSWORD:-moodle}
+      
+      # Moodle configuration
+      MOODLE_URL: ${MOODLE_URL:-http://localhost}
+      MOODLE_FULLNAME: ${MOODLE_FULLNAME:-"My Moodle Site"}
+      MOODLE_SHORTNAME: ${MOODLE_SHORTNAME:-"moodle"}
+      MOODLE_ADMIN_USER: ${MOODLE_ADMIN_USER:-admin}
+      MOODLE_ADMIN_PASS: ${MOODLE_ADMIN_PASS:-admin}
+      MOODLE_ADMIN_EMAIL: ${MOODLE_ADMIN_EMAIL:-admin@example.com}
+      
+      # PHP configuration
+      PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-512M}
+      PHP_MAX_EXECUTION_TIME: ${PHP_MAX_EXECUTION_TIME:-300}
+      PHP_UPLOAD_MAX_FILESIZE: ${PHP_UPLOAD_MAX_FILESIZE:-100M}
+      PHP_POST_MAX_SIZE: ${PHP_POST_MAX_SIZE:-100M}
+    volumes:
+      - moodle_data:/var/www/moodledata
+      - moodle_backups:/var/www/backups
+      - ./config.php:/var/www/html/config.php:ro
+    ports:
+      - "${MOODLE_PORT:-8080}:80"
+    networks:
+      - moodle-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Nginx Reverse Proxy (Optional)
+  nginx:
+    image: nginx:alpine
+    container_name: moodle-nginx
+    restart: unless-stopped
+    depends_on:
+      - moodle
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - moodle-network
+    profiles:
+      - production
+
+  # phpMyAdmin (Development only)
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: moodle-phpmyadmin
+    restart: unless-stopped
+    depends_on:
+      - mysql
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_USER: ${MYSQL_USER:-moodle}
+      PMA_PASSWORD: ${MYSQL_PASSWORD:-moodle}
+    ports:
+      - "8081:80"
+    networks:
+      - moodle-network
+    profiles:
+      - development
+
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+  moodle_data:
+    driver: local
+  moodle_backups:
+    driver: local
+
+networks:
+  moodle-network:
+    driver: bridge 

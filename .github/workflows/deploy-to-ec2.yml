@@ -1,0 +1,154 @@
+name: Deploy Moodle to EC2
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  AWS_REGION: us-east-1  # Change this to your AWS region
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Create deployment package
+        run: |
+          # Create a deployment package excluding unnecessary files
+          tar -czf moodle-deploy.tar.gz \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            --exclude='vendor' \
+            --exclude='*.log' \
+            --exclude='config.php' \
+            --exclude='moodledata' \
+            .
+            
+      - name: Deploy to EC2
+        run: |
+          # Create a deployment script
+          cat > deploy.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          
+          # Variables
+          DEPLOY_PATH="/var/www/html"
+          BACKUP_PATH="/var/www/backups"
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          
+          # Create backup directory if it doesn't exist
+          sudo mkdir -p $BACKUP_PATH
+          
+          # Create backup of current deployment
+          if [ -d "$DEPLOY_PATH" ]; then
+            echo "Creating backup of current deployment..."
+            sudo tar -czf $BACKUP_PATH/moodle_backup_$TIMESTAMP.tar.gz -C $DEPLOY_PATH .
+          fi
+          
+          # Stop web server temporarily
+          echo "Stopping web server..."
+          sudo systemctl stop apache2 || sudo systemctl stop nginx || true
+          
+          # Remove old files (keeping config and data)
+          echo "Removing old files..."
+          sudo find $DEPLOY_PATH -maxdepth 1 -mindepth 1 ! -name 'config.php' ! -name 'moodledata' -exec rm -rf {} +
+          
+          # Extract new deployment
+          echo "Extracting new deployment..."
+          sudo tar -xzf moodle-deploy.tar.gz -C $DEPLOY_PATH
+          
+          # Set proper permissions
+          echo "Setting permissions..."
+          sudo chown -R www-data:www-data $DEPLOY_PATH
+          sudo chmod -R 755 $DEPLOY_PATH
+          sudo find $DEPLOY_PATH -type f -exec chmod 644 {} \;
+          sudo find $DEPLOY_PATH -type d -exec chmod 755 {} \;
+          
+          # Make sure moodledata directory exists and has proper permissions
+          sudo mkdir -p $DEPLOY_PATH/moodledata
+          sudo chown -R www-data:www-data $DEPLOY_PATH/moodledata
+          sudo chmod -R 777 $DEPLOY_PATH/moodledata
+          
+          # Start web server
+          echo "Starting web server..."
+          sudo systemctl start apache2 || sudo systemctl start nginx || true
+          
+          # Clear cache
+          echo "Clearing cache..."
+          sudo rm -rf $DEPLOY_PATH/moodledata/cache/*
+          sudo rm -rf $DEPLOY_PATH/moodledata/temp/*
+          
+          echo "Deployment completed successfully!"
+          EOF
+          
+          chmod +x deploy.sh
+          
+      - name: Copy files to EC2
+        run: |
+          # Copy deployment package and script to EC2
+          scp -o StrictHostKeyChecking=no -i ${{ secrets.EC2_SSH_KEY }} \
+            moodle-deploy.tar.gz \
+            deploy.sh \
+            ubuntu@${{ secrets.EC2_HOST }}:/tmp/
+            
+      - name: Execute deployment on EC2
+        run: |
+          # Execute deployment script on EC2
+          ssh -o StrictHostKeyChecking=no -i ${{ secrets.EC2_SSH_KEY }} \
+            ubuntu@${{ secrets.EC2_HOST }} \
+            'cd /tmp && ./deploy.sh'
+            
+      - name: Health check
+        run: |
+          # Wait a moment for services to start
+          sleep 30
+          
+          # Perform health check
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.EC2_HOST }})
+          
+          if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "302" ]; then
+            echo "✅ Health check passed! HTTP Status: $HTTP_STATUS"
+          else
+            echo "❌ Health check failed! HTTP Status: $HTTP_STATUS"
+            exit 1
+          fi
+          
+      - name: Cleanup
+        if: always()
+        run: |
+          # Clean up temporary files on EC2
+          ssh -o StrictHostKeyChecking=no -i ${{ secrets.EC2_SSH_KEY }} \
+            ubuntu@${{ secrets.EC2_HOST }} \
+            'rm -f /tmp/moodle-deploy.tar.gz /tmp/deploy.sh'
+            
+      - name: Notify deployment status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "🚀 Deployment to ${{ github.event.inputs.environment || 'staging' }} completed successfully!"
+          else
+            echo "❌ Deployment to ${{ github.event.inputs.environment || 'staging' }} failed!"
+          fi 
