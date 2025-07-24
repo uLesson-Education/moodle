@@ -1,0 +1,60 @@
+name: Sync with Moodle Upstream
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Runs daily at midnight UTC
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for proper merging
+
+      - name: Set up Git
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+
+      - name: Ensure upstream remote is set
+        run: |
+          if ! git remote | grep -q upstream; then
+            git remote add upstream https://github.com/moodle/moodle.git
+          fi
+          git fetch upstream
+
+      - name: Check for merge conflicts
+        id: merge
+        run: |
+          git checkout main
+          if git merge upstream/main --no-commit --no-ff; then
+            echo "Merge successful, no conflicts"
+            echo "merge_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "Merge conflicts detected"
+            echo "merge_status=conflict" >> $GITHUB_OUTPUT
+            git merge --abort
+          fi
+
+      - name: Push changes if no conflicts
+        if: steps.merge.outputs.merge_status == 'success'
+        run: |
+          git commit -m "Merge upstream Moodle changes from main branch"
+          git push origin main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Uses built-in GitHub token
+
+      - name: Notify on merge conflicts
+        if: steps.merge.outputs.merge_status == 'conflict'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}  # Uses built-in GitHub token
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Merge Conflict Detected with Moodle Upstream',
+              body: 'The latest attempt to merge upstream Moodle changes (main branch) into the main branch resulted in conflicts. Please resolve manually.'
+            })
