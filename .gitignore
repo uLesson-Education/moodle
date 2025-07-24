@@ -48,7 +48,6 @@ composer.phar
 /lib/yuilib/*/*/*-coverage.js
 atlassian-ide-plugin.xml
 /node_modules/
-/.vscode/
 moodle-plugin-ci.phar
 .eslintignore
 .stylelintignore
@@ -60,3 +59,6 @@ phpcs.xml
 jsconfig.json
 UPGRADING-CURRENT.md
 .phpunit.cache
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
