@@ -67,11 +67,10 @@ RUN groupadd -r moodle && useradd -r -g moodle moodle
 # Create necessary directories
 RUN mkdir -p /var/www/html /var/www/moodledata /var/www/backups
 
-# Download and extract Moodle
-RUN wget -O /tmp/moodle.tgz ${MOODLE_URL} \
-    && tar -xzf /tmp/moodle.tgz -C /tmp \
-    && cp -r /tmp/moodle/* /var/www/html/ \
-    && rm -rf /tmp/moodle.tgz /tmp/moodle
+# Copy Moodle code from the local repository into the image
+COPY . /var/www/html/
+
+# (Recommended) Use a .dockerignore file to exclude files/folders you don't want in the image, e.g. .git, moodledata, node_modules, etc.
 
 # Set proper permissions
 RUN chown -R moodle:moodle /var/www/html /var/www/moodledata /var/www/backups \

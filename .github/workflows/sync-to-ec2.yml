@@ -1,0 +1,36 @@
+name: Sync Moodle Files to EC2
+
+on:
+  push:
+    branches:
+      - staging*
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to sync to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  sync-to-ec2:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Sync files to EC2 using rsync
+        run: |
+          rsync -avz --delete --exclude='.git*' --exclude='vendor/' --exclude='node_modules/' -e "ssh -o StrictHostKeyChecking=no -i ${{ secrets.EC2_SSH_KEY }}" ./ ubuntu@${{ secrets.EC2_HOST }}:/home/ubuntu/moodle/
+
+      - name: Notify sync status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Moodle files synced to ${{ github.event.inputs.environment || 'staging' }} successfully!"
+          else
+            echo "❌ Moodle file sync to ${{ github.event.inputs.environment || 'staging' }} failed!"
+          fi 

@@ -71,6 +71,7 @@ services:
       - moodle_data:/var/www/moodledata
       - moodle_backups:/var/www/backups
       - ./config.php:/var/www/html/config.php:ro
+      - moodle_html:/var/www/html
     ports:
       - "${MOODLE_PORT:-8080}:80"
     networks:
@@ -127,7 +128,8 @@ volumes:
     driver: local
   moodle_backups:
     driver: local
-
+  moodle_html:
+    driver: local
 networks:
   moodle-network:
     driver: bridge 
