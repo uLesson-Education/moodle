@@ -22,9 +22,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up SSH key
+        run: |
+          echo "${{ secrets.EC2_SSH_KEY }}" > ec2_key.pem
+          chmod 600 ec2_key.pem
+
       - name: Sync files to EC2 using rsync
         run: |
-          rsync -avz --delete --exclude='.git*' --exclude='vendor/' --exclude='node_modules/' -e "ssh -o StrictHostKeyChecking=no -i ${{ secrets.EC2_SSH_KEY }}" ./ ubuntu@${{ secrets.EC2_HOST }}:/home/ubuntu/moodle/
+          rsync -avz --delete --exclude='.git*' --exclude='vendor/' --exclude='node_modules/' -e "ssh -o StrictHostKeyChecking=no -i ec2_key.pem" ./ ubuntu@${{ secrets.EC2_HOST }}:/home/ubuntu/moodle/
 
       - name: Notify sync status
         if: always()
